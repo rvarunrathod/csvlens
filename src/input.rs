@@ -1,4 +1,5 @@
 use crate::app::WrapMode;
+use crate::command::{self, ColonCommand, CompletionResult};
 use crate::common::InputMode;
 use crate::history::BufferHistoryContainer;
 use crate::util::events::{CsvlensEvent, CsvlensEvents};
@@ -33,6 +34,8 @@ pub enum Control {
     FilterColumns(String),
     FilterLikeCell,
     FreezeColumns(usize),
+    /// Parsed `:` command (see [`crate::command`]).
+    Command(ColonCommand),
     Quit,
     BufferContent(Input),
     BufferReset,
@@ -69,6 +72,14 @@ pub struct InputHandler {
     mode: InputMode,
     buffer_state: BufferState,
     buffer_history_container: BufferHistoryContainer,
+    /// Column headers for Tab completion in command / filter modes.
+    completion_columns: Vec<String>,
+    /// Display labels for the active completion set (`completion_index` selects one).
+    pub completion_candidates: Vec<String>,
+    /// Full buffer lines for each candidate (parallel to `completion_candidates`).
+    completion_lines: Vec<String>,
+    /// Selected candidate index, or `-1` when the picker is closed.
+    pub completion_index: isize,
 }
 
 impl InputHandler {
@@ -78,7 +89,26 @@ impl InputHandler {
             mode: InputMode::Default,
             buffer_state: BufferState::Inactive,
             buffer_history_container: BufferHistoryContainer::new(),
+            completion_columns: Vec::new(),
+            completion_candidates: Vec::new(),
+            completion_lines: Vec::new(),
+            completion_index: -1,
         }
+    }
+
+    /// Update headers used for column-name completion (call when data/headers change).
+    pub fn set_completion_columns(&mut self, columns: Vec<String>) {
+        self.completion_columns = columns;
+    }
+
+    fn completion_open(&self) -> bool {
+        !self.completion_lines.is_empty() && self.completion_index >= 0
+    }
+
+    pub fn clear_completion_ui(&mut self) {
+        self.completion_candidates.clear();
+        self.completion_lines.clear();
+        self.completion_index = -1;
     }
 
     pub fn next(&mut self) -> Control {
@@ -155,6 +185,10 @@ impl InputHandler {
                     self.init_buffer(InputMode::Filter);
                     Control::empty_buffer()
                 }
+                KeyCode::Char(':') => {
+                    self.init_buffer(InputMode::Command);
+                    Control::empty_buffer()
+                }
                 KeyCode::Char('*') => {
                     self.init_buffer(InputMode::FilterColumns);
                     Control::empty_buffer()
@@ -205,24 +239,46 @@ impl InputHandler {
     }
 
     fn handler_buffering(&mut self, key_event: KeyEvent) -> Control {
-        let input = match &mut self.buffer_state {
-            BufferState::Active(input) => input,
-            BufferState::Inactive => return Control::Nothing,
-        };
+        if !matches!(self.buffer_state, BufferState::Active(_)) {
+            return Control::Nothing;
+        }
         if self.mode == InputMode::Option {
             return self.handler_buffering_option_mode(key_event);
         }
+        let completion_open = self.completion_open();
+        let in_complete_mode =
+            matches!(self.mode, InputMode::Command | InputMode::Filter | InputMode::Find);
+
         match key_event.code {
+            KeyCode::Esc if completion_open => {
+                // First Esc only dismisses the picker (fzf-like).
+                let value = self.active_buffer_value();
+                let cursor = value.len();
+                self.clear_completion_ui();
+                let input = Input::new(value).with_cursor(cursor);
+                self.buffer_state = BufferState::Active(input.clone());
+                Control::BufferContent(input)
+            }
             KeyCode::Esc => {
+                self.clear_completion_ui();
                 self.reset_buffer();
                 Control::BufferReset
             }
+            // Open or cycle completion picker
+            KeyCode::Tab | KeyCode::BackTab if in_complete_mode => {
+                let reverse = matches!(key_event.code, KeyCode::BackTab)
+                    || key_event.modifiers.contains(KeyModifiers::SHIFT);
+                self.apply_tab_completion(reverse)
+            }
+            // Navigate picker without touching command history
+            KeyCode::Up | KeyCode::Down if completion_open => {
+                let reverse = matches!(key_event.code, KeyCode::Up);
+                self.cycle_completion(reverse)
+            }
             KeyCode::Char('g' | 'G') | KeyCode::Enter if self.mode == InputMode::GotoLine => {
-                self.buffer_history_container.set(self.mode, input.value());
-                let goto_line = match &self.buffer_state {
-                    BufferState::Active(input) => input.value().parse::<usize>().ok(),
-                    BufferState::Inactive => None,
-                };
+                let value = self.active_buffer_value();
+                self.buffer_history_container.set(self.mode, &value);
+                let goto_line = value.parse::<usize>().ok();
                 let res = if let Some(n) = goto_line {
                     Control::ScrollTo(n)
                 } else {
@@ -231,9 +287,21 @@ impl InputHandler {
                 self.reset_buffer();
                 res
             }
+            // Enter with picker open: accept selection into the line, keep editing
+            KeyCode::Enter if completion_open => {
+                let line = self
+                    .completion_lines
+                    .get(self.completion_index as usize)
+                    .cloned()
+                    .unwrap_or_else(|| self.active_buffer_value());
+                self.clear_completion_ui();
+                self.apply_completion_line(&line)
+            }
             KeyCode::Up => {
+                self.clear_completion_ui();
                 let mode = match self.mode {
                     InputMode::Filter => InputMode::Find,
+                    InputMode::Command => InputMode::Command,
                     _ => self.mode,
                 };
                 if let Some(buf) = self.buffer_history_container.prev(mode) {
@@ -244,8 +312,10 @@ impl InputHandler {
                 }
             }
             KeyCode::Down => {
+                self.clear_completion_ui();
                 let mode = match self.mode {
                     InputMode::Filter => InputMode::Find,
+                    InputMode::Command => InputMode::Command,
                     _ => self.mode,
                 };
                 if let Some(buf) = self.buffer_history_container.next(mode) {
@@ -257,31 +327,61 @@ impl InputHandler {
                 }
             }
             KeyCode::Enter => {
-                let control;
-                if input.value().is_empty() {
-                    control = Control::BufferReset;
-                } else if self.mode == InputMode::Find {
-                    control = Control::Find(input.value().to_string());
-                } else if self.mode == InputMode::Filter {
-                    control = Control::Filter(input.value().to_string());
-                } else if self.mode == InputMode::FilterColumns {
-                    control = Control::FilterColumns(input.value().to_string());
+                self.clear_completion_ui();
+                let value = self.active_buffer_value();
+                let mode = self.mode;
+                let control = if value.is_empty() {
+                    Control::BufferReset
+                } else if mode == InputMode::Find {
+                    if command::looks_like_expression(&value) {
+                        match command::parse_filter_expr(&value) {
+                            Ok(expr) => Control::Command(ColonCommand::Find(expr)),
+                            Err(_) => Control::Find(value.clone()),
+                        }
+                    } else {
+                        Control::Find(value.clone())
+                    }
+                } else if mode == InputMode::Filter {
+                    if command::looks_like_expression(&value) {
+                        match command::parse_filter_expr(&value) {
+                            Ok(expr) => Control::Command(ColonCommand::Filter(expr)),
+                            Err(_) => Control::Filter(value.clone()),
+                        }
+                    } else {
+                        Control::Filter(value.clone())
+                    }
+                } else if mode == InputMode::FilterColumns {
+                    Control::FilterColumns(value.clone())
+                } else if mode == InputMode::Command {
+                    match command::parse_colon_command(&value) {
+                        Ok(cmd) => Control::Command(cmd),
+                        Err(e) => Control::UserError(e),
+                    }
                 } else {
-                    control = Control::BufferReset;
-                }
-                if self.mode == InputMode::Filter {
-                    // Share buffer history between Find and Filter, see also KeyCode::Up
-                    self.buffer_history_container
-                        .set(InputMode::Find, input.value());
+                    Control::BufferReset
+                };
+                if mode == InputMode::Filter {
+                    self.buffer_history_container.set(InputMode::Find, &value);
                 } else {
-                    self.buffer_history_container.set(self.mode, input.value());
+                    self.buffer_history_container.set(mode, &value);
                 }
-                self.reset_buffer();
+                if !matches!(control, Control::UserError(_)) {
+                    self.reset_buffer();
+                }
                 control
             }
             _ => {
+                let is_edit = !matches!(
+                    key_event.code,
+                    KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End
+                );
+                if is_edit {
+                    self.clear_completion_ui();
+                }
+                let BufferState::Active(ref mut input) = self.buffer_state else {
+                    return Control::Nothing;
+                };
                 if input.handle_event(&Event::Key(key_event)).is_some() {
-                    // Parse immediately for FreezeColumns since it should just be a number
                     let control = if self.mode == InputMode::FreezeColumns {
                         let control = if let Ok(n) = input.value().parse::<usize>() {
                             Control::FreezeColumns(n)
@@ -298,6 +398,84 @@ impl InputHandler {
                 Control::Nothing
             }
         }
+    }
+
+    fn active_buffer_value(&self) -> String {
+        match &self.buffer_state {
+            BufferState::Active(input) => input.value().to_string(),
+            BufferState::Inactive => String::new(),
+        }
+    }
+
+    /// Open the completion picker (first Tab) or move the selection (later Tab / arrows).
+    /// The command line is updated live to preview the selection (fzf-style).
+    fn apply_tab_completion(&mut self, reverse: bool) -> Control {
+        if !matches!(self.buffer_state, BufferState::Active(_)) {
+            return Control::Nothing;
+        }
+
+        if self.completion_open() {
+            return self.cycle_completion(reverse);
+        }
+
+        let current = self.active_buffer_value();
+        let line_for_complete = match self.mode {
+            InputMode::Command => current,
+            InputMode::Filter | InputMode::Find => {
+                if current.is_empty() {
+                    "filter ".to_string()
+                } else {
+                    format!("filter {current}")
+                }
+            }
+            _ => current,
+        };
+        let CompletionResult {
+            line,
+            candidates,
+            lines,
+            index,
+        } = command::complete_command_line(&line_for_complete, &self.completion_columns, 0);
+        if lines.is_empty() {
+            return Control::Nothing;
+        }
+        self.completion_candidates = candidates;
+        self.completion_lines = lines;
+        self.completion_index = index;
+        self.apply_completion_line(&line)
+    }
+
+    fn cycle_completion(&mut self, reverse: bool) -> Control {
+        if self.completion_lines.is_empty() {
+            return Control::Nothing;
+        }
+        let n = self.completion_lines.len();
+        let idx = if reverse {
+            if self.completion_index <= 0 {
+                n - 1
+            } else {
+                self.completion_index as usize - 1
+            }
+        } else {
+            (self.completion_index as usize + 1) % n
+        };
+        self.completion_index = idx as isize;
+        let line = self.completion_lines[idx].clone();
+        self.apply_completion_line(&line)
+    }
+
+    fn apply_completion_line(&mut self, line: &str) -> Control {
+        let new_value = match self.mode {
+            InputMode::Filter | InputMode::Find => line
+                .strip_prefix("filter ")
+                .unwrap_or(line)
+                .to_string(),
+            _ => line.to_string(),
+        };
+        let cursor = new_value.len();
+        let new_input = Input::new(new_value).with_cursor(cursor);
+        self.buffer_state = BufferState::Active(new_input.clone());
+        Control::BufferContent(new_input)
     }
 
     fn handler_buffering_option_mode(&mut self, key_event: KeyEvent) -> Control {

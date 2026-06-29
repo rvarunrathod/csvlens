@@ -8,6 +8,8 @@ pub enum InputMode {
     Filter,
     FilterColumns,
     FreezeColumns,
+    /// Vim-style colon command line (`:`).
+    Command,
     Option,
     Help,
 }

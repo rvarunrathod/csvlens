@@ -37,4 +37,10 @@ pub enum CsvlensError {
 
     #[error("Draw error: {0}")]
     DrawError(String),
+
+    #[error("Theme not found: {0} (use auto, dark, light, a path to a .toml file, or a name under the config themes directory)")]
+    ThemeNotFound(String),
+
+    #[error("Failed to load theme: {0}")]
+    ThemeLoadError(String),
 }

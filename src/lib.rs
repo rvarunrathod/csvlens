@@ -39,6 +39,7 @@
 //! ```
 mod app;
 mod columns_filter;
+mod command;
 mod common;
 mod csv;
 mod delimiter;
@@ -50,7 +51,7 @@ mod input;
 mod io;
 mod runner;
 mod sort;
-mod theme;
+pub mod theme;
 mod ui;
 mod util;
 mod view;
@@ -61,6 +62,7 @@ pub use app::WrapMode;
 pub use runner::CsvlensOptions;
 pub use runner::run_csvlens;
 pub use runner::run_csvlens_with_options;
+pub use theme::Theme;
 
 #[cfg(any(test, feature = "bench"))]
 pub mod bench_api {

@@ -1,4 +1,5 @@
 use crate::columns_filter;
+use crate::command::ResolvedPredicate;
 use crate::csv;
 use crate::csv::CsvlensRecordIterator;
 use crate::errors::CsvlensResult;
@@ -98,6 +99,9 @@ pub struct Finder {
     pub cursor: Option<FinderCursor>,
     row_hint: usize,
     target: Regex,
+    /// When set, a row matches only if every predicate matches (AND). Highlight
+    /// columns are the predicate columns that matched on that row.
+    predicates: Option<Vec<ResolvedPredicate>>,
     column_index: Option<usize>,
     starting_row_index: usize,
     sorter: Option<Arc<sort::Sorter>>,
@@ -222,6 +226,28 @@ impl Finder {
         sort_order: SortOrder,
         columns_filter: Option<Arc<columns_filter::ColumnsFilter>>,
     ) -> CsvlensResult<Self> {
+        Self::new_with_predicates(
+            config,
+            target,
+            column_index,
+            starting_row_index,
+            sorter,
+            sort_order,
+            columns_filter,
+            None,
+        )
+    }
+
+    pub fn new_with_predicates(
+        config: Arc<csv::CsvConfig>,
+        target: Regex,
+        column_index: Option<usize>,
+        starting_row_index: usize,
+        sorter: Option<Arc<sort::Sorter>>,
+        sort_order: SortOrder,
+        columns_filter: Option<Arc<columns_filter::ColumnsFilter>>,
+        predicates: Option<Vec<ResolvedPredicate>>,
+    ) -> CsvlensResult<Self> {
         let internal = FinderInternalState::init(
             config,
             target.clone(),
@@ -230,18 +256,24 @@ impl Finder {
             sorter.clone(),
             sort_order,
             columns_filter,
+            predicates.clone(),
         );
         let finder = Finder {
             internal,
             cursor: None,
             row_hint: starting_row_index,
             target,
+            predicates,
             column_index,
             starting_row_index,
             sorter: sorter.clone(),
             sort_order,
         };
         Ok(finder)
+    }
+
+    pub fn predicates(&self) -> Option<&[ResolvedPredicate]> {
+        self.predicates.as_deref()
     }
 
     pub fn count(&self) -> usize {
@@ -464,6 +496,7 @@ impl FinderInternalState {
         sorter: Option<Arc<sort::Sorter>>,
         sort_order: SortOrder,
         columns_filter: Option<Arc<columns_filter::ColumnsFilter>>,
+        predicates: Option<Vec<ResolvedPredicate>>,
     ) -> Arc<Mutex<FinderInternalState>> {
         let internal = FinderInternalState {
             count: 0,
@@ -485,9 +518,35 @@ impl FinderInternalState {
         let _handle = thread::spawn(move || {
             let mut bg_reader = config.new_reader().unwrap();
 
-            // search header
+            // Map origin column index -> local (visible) column index for highlighting.
+            let origin_to_local: Option<Vec<Option<usize>>> = if predicates.is_some() {
+                if let Ok(header) = bg_reader.headers() {
+                    let mut map = vec![None; header.len()];
+                    let mut local_column_index = 0usize;
+                    for (column_index, _) in header.iter().enumerate() {
+                        if let Some(columns_filter) = &columns_filter
+                            && !columns_filter.is_column_filtered(column_index)
+                        {
+                            continue;
+                        }
+                        if column_index < map.len() {
+                            map[column_index] = Some(local_column_index);
+                        }
+                        local_column_index += 1;
+                    }
+                    Some(map)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // search header (regex mode only; predicates apply to data rows)
             let mut column_indices = vec![];
-            if let Ok(header) = bg_reader.headers() {
+            if predicates.is_none()
+                && let Ok(header) = bg_reader.headers()
+            {
                 let mut local_column_index = 0;
                 for (column_index, field) in header.iter().enumerate() {
                     if let Some(columns_filter) = &columns_filter
@@ -513,23 +572,49 @@ impl FinderInternalState {
             for (row_index, r) in records.enumerate() {
                 let mut column_indices = vec![];
                 if let Ok(valid_record) = r {
-                    let mut local_column_index = 0;
-                    for (column_index, field) in valid_record.iter().enumerate() {
-                        if let Some(columns_filter) = &columns_filter
-                            && !columns_filter.is_column_filtered(column_index)
-                        {
-                            continue;
-                        }
-                        let should_check_regex =
-                            if let Some(target_local_column_index) = target_local_column_index {
-                                local_column_index == target_local_column_index
+                    if let Some(preds) = &predicates {
+                        // AND across predicates (each uses origin column index).
+                        let mut all_ok = true;
+                        let mut matched_locals = Vec::new();
+                        for pred in preds {
+                            let field = valid_record.get(pred.column_index).unwrap_or("");
+                            if pred.matches_cell(field) {
+                                if let Some(map) = &origin_to_local
+                                    && let Some(Some(local)) = map.get(pred.column_index)
+                                {
+                                    matched_locals.push(*local);
+                                }
                             } else {
-                                true
-                            };
-                        if should_check_regex && target.is_match(field) {
-                            column_indices.push(local_column_index);
+                                all_ok = false;
+                                break;
+                            }
                         }
-                        local_column_index += 1;
+                        if all_ok {
+                            column_indices = matched_locals;
+                            if column_indices.is_empty() {
+                                // still mark the row (e.g. empty checks) with col 0 if visible
+                                column_indices.push(0);
+                            }
+                        }
+                    } else {
+                        let mut local_column_index = 0;
+                        for (column_index, field) in valid_record.iter().enumerate() {
+                            if let Some(columns_filter) = &columns_filter
+                                && !columns_filter.is_column_filtered(column_index)
+                            {
+                                continue;
+                            }
+                            let should_check_regex =
+                                if let Some(target_local_column_index) = target_local_column_index {
+                                    local_column_index == target_local_column_index
+                                } else {
+                                    true
+                                };
+                            if should_check_regex && target.is_match(field) {
+                                column_indices.push(local_column_index);
+                            }
+                            local_column_index += 1;
+                        }
                     }
                 }
                 if !column_indices.is_empty() {
