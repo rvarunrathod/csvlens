@@ -37,9 +37,20 @@ pub enum ColonCommand {
     /// `:columns <regex|a,b,c|"Name With Space">`
     Columns(String),
     /// `:sort [+-]column` — `+` ascending (default), `-` descending by name.
-    Sort { column: String, descending: bool },
+    Sort {
+        column: String,
+        descending: bool,
+    },
     /// `:goto <n>`
     Goto(usize),
+    /// `:gc <name>` — jump to column by fuzzy name.
+    GotoColumn(String),
+    /// `:hide` — toggle hide on the selected (or current) column.
+    HideColumn,
+    /// `:show` — show all columns (clear column filter).
+    ShowAllColumns,
+    /// `:only` — hide all columns except the selected (or current) one.
+    HideAllExceptSelected,
     /// `:theme <name|path>`
     Theme(String),
     /// `:export <path>` — reserved; returns a friendly not-implemented for now if wired.
@@ -118,11 +129,14 @@ impl FilterExpr {
             let (regex, number) = match clause.op {
                 FilterOp::Empty | FilterOp::NotEmpty => (None, None),
                 FilterOp::Gt | FilterOp::Lt => {
-                    let n = clause
-                        .value
-                        .trim()
-                        .parse::<f64>()
-                        .map_err(|_| format!("expected number for {}{}, got '{}'", name, clause.op.as_str(), clause.value))?;
+                    let n = clause.value.trim().parse::<f64>().map_err(|_| {
+                        format!(
+                            "expected number for {}{}, got '{}'",
+                            name,
+                            clause.op.as_str(),
+                            clause.value
+                        )
+                    })?;
                     (None, Some(n))
                 }
                 FilterOp::Eq | FilterOp::Ne => {
@@ -268,6 +282,16 @@ pub fn parse_colon_command(line: &str) -> Result<ColonCommand, String> {
                 .map_err(|_| format!("usage: :goto <line>, got '{rest}'"))?;
             Ok(ColonCommand::Goto(n))
         }
+        "gc" => {
+            let rest = rest.trim();
+            if rest.is_empty() {
+                return Err("usage: :gc <column name>".into());
+            }
+            Ok(ColonCommand::GotoColumn(unquote_column(rest)))
+        }
+        "hide" => Ok(ColonCommand::HideColumn),
+        "show" => Ok(ColonCommand::ShowAllColumns),
+        "only" => Ok(ColonCommand::HideAllExceptSelected),
         "theme" => {
             if rest.trim().is_empty() {
                 return Err("usage: :theme <name|path>".into());
@@ -312,7 +336,7 @@ pub fn parse_colon_command(line: &str) -> Result<ColonCommand, String> {
         // Bare expression shortcut: `:status=error` when first token isn't a known command
         _ if looks_like_expression(line) => Ok(ColonCommand::Filter(parse_filter_expr(line)?)),
         _ => Err(format!(
-            "unknown command '{cmd}'. Try :filter, :find, :columns, :sort, :goto, :theme, :export, :clear, :help"
+            "unknown command '{cmd}'. Try :filter, :find, :columns, :sort, :goto, :gc, :hide, :show, :only, :theme, :export, :clear, :help"
         )),
     }
 }
@@ -357,9 +381,7 @@ pub fn looks_like_expression(s: &str) -> bool {
     // status:failed sugar (single colon, not a command word)
     if let Some(i) = s.find(':') {
         let after = &s[i + 1..];
-        return !after.is_empty()
-            && !after.starts_with("//")
-            && !s[..i].contains(' ');
+        return !after.is_empty() && !after.starts_with("//") && !s[..i].contains(' ');
     }
     false
 }
@@ -468,14 +490,7 @@ fn parse_one_clause(input: &str) -> Result<(FilterClause, usize), String> {
     let ws = after_op.len() - after_op_trim.len();
     let (value, val_len) = parse_value_token(after_op_trim)?;
     let total = col_len + after_col_trim_start + op_len + ws + val_len;
-    Ok((
-        FilterClause {
-            column,
-            op,
-            value,
-        },
-        total,
-    ))
+    Ok((FilterClause { column, op, value }, total))
 }
 
 /// Parse a column name token; returns (raw token including quotes, byte length consumed).
@@ -505,7 +520,13 @@ fn parse_column_token(input: &str) -> Result<(String, usize), String> {
     let mut i = 0;
     while i < bytes.len() {
         let c = bytes[i];
-        if c == b'=' || c == b'!' || c == b'~' || c == b'>' || c == b'<' || c == b':' || c.is_ascii_whitespace()
+        if c == b'='
+            || c == b'!'
+            || c == b'~'
+            || c == b'>'
+            || c == b'<'
+            || c == b':'
+            || c.is_ascii_whitespace()
         {
             break;
         }
@@ -587,7 +608,10 @@ pub fn unquote_column(token: &str) -> String {
         let q = b[0];
         if (q == b'"' || q == b'\'' || q == b'`') && b[b.len() - 1] == q {
             let inner = &token[1..token.len() - 1];
-            return inner.replace("\\\"", "\"").replace("\\'", "'").replace("\\`", "`");
+            return inner
+                .replace("\\\"", "\"")
+                .replace("\\'", "'")
+                .replace("\\`", "`");
         }
     }
     token.to_string()
@@ -616,7 +640,8 @@ pub fn quote_column_for_input(name: &str) -> String {
 // --- Completion ----------------------------------------------------------------
 
 const COMMAND_NAMES: &[&str] = &[
-    "filter", "find", "columns", "sort", "goto", "theme", "export", "clear", "help", "quit",
+    "filter", "find", "columns", "sort", "goto", "gc", "hide", "show", "only", "theme", "export",
+    "clear", "help", "quit",
 ];
 
 #[derive(Debug, Clone, Default)]
@@ -658,6 +683,20 @@ pub fn complete_command_line(line: &str, columns: &[String], cycle: isize) -> Co
         return complete_columns_list(cmd, rest, columns, cycle, line);
     }
 
+    // `:gc <column>`
+    if cmd_l == "gc" {
+        let col_prefix = rest.trim_start();
+        let prefix_lower = unquote_column(col_prefix).to_ascii_lowercase();
+        let candidates: Vec<String> = columns
+            .iter()
+            .filter(|c| c.to_ascii_lowercase().starts_with(&prefix_lower))
+            .cloned()
+            .collect();
+        return apply_cycle(line, &candidates, cycle, |c| {
+            format!("gc {}", quote_column_for_input(c))
+        });
+    }
+
     // `:sort [+-]column`
     if cmd_l == "sort" {
         let (desc_prefix, col_prefix) = if let Some(r) = rest.strip_prefix('-') {
@@ -681,8 +720,7 @@ pub fn complete_command_line(line: &str, columns: &[String], cycle: isize) -> Co
     }
 
     // After `filter ` / `find ` — complete column for the in-progress clause
-    if matches!(cmd_l.as_str(), "filter" | "find" | "v" | "search") || looks_like_expression(line)
-    {
+    if matches!(cmd_l.as_str(), "filter" | "find" | "v" | "search") || looks_like_expression(line) {
         let expr_part = if looks_like_expression(line)
             && !matches!(cmd_l.as_str(), "filter" | "find" | "v" | "search")
         {
@@ -757,9 +795,7 @@ fn complete_columns_list(
         .filter(|c| {
             let cl = c.to_ascii_lowercase();
             cl.starts_with(&prefix_lower)
-                && !already
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case(c.as_str()))
+                && !already.iter().any(|a| a.eq_ignore_ascii_case(c.as_str()))
         })
         .cloned()
         .collect();
@@ -769,11 +805,7 @@ fn complete_columns_list(
     let candidates = if candidates.is_empty() && prefix_lower.is_empty() {
         columns
             .iter()
-            .filter(|c| {
-                !already
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case(c.as_str()))
-            })
+            .filter(|c| !already.iter().any(|a| a.eq_ignore_ascii_case(c.as_str())))
             .cloned()
             .collect()
     } else {
@@ -952,6 +984,10 @@ impl fmt::Display for ColonCommand {
                 write!(f, "sort {}{column}", if *descending { "-" } else { "+" })
             }
             ColonCommand::Goto(n) => write!(f, "goto {n}"),
+            ColonCommand::GotoColumn(name) => write!(f, "gc {name}"),
+            ColonCommand::HideColumn => write!(f, "hide"),
+            ColonCommand::ShowAllColumns => write!(f, "show"),
+            ColonCommand::HideAllExceptSelected => write!(f, "only"),
             ColonCommand::Theme(t) => write!(f, "theme {t}"),
             ColonCommand::Export(p) => write!(f, "export {p}"),
             ColonCommand::Help => write!(f, "help"),
@@ -1014,11 +1050,7 @@ mod tests {
 
     #[test]
     fn resolve_column_and_match() {
-        let headers = vec![
-            "status".into(),
-            "First Name".into(),
-            "age".into(),
-        ];
+        let headers = vec!["status".into(), "First Name".into(), "age".into()];
         let e = parse_filter_expr(r#"status=ok "First Name"~Al age>1"#).unwrap();
         let preds = e.resolve(&headers, true).unwrap();
         assert!(preds[0].matches_cell("ok"));

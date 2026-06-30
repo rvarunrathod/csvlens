@@ -62,6 +62,10 @@ Press **`:`** to open the command line (status shows a leading `:`).
 | `:columns a,b,"Name"` | Show only these columns (comma list or regex) |
 | `:sort [+|-]<column>` | Sort ascending (`+`, default) or descending (`-`) |
 | `:goto <n>` | Jump to line `n` |
+| `:gc <name>` | Jump to column by fuzzy-matched name |
+| `:hide` | Toggle hide on the selected (or current) column |
+| `:show` | Show all columns |
+| `:only` | Show only the selected (or current) column |
 | `:theme <name\|path>` | Switch theme (same resolution as `--theme`) |
 | `:clear` | Clear find/filter, column filter, and sort |
 | `:filter` / `:find` alone | Clear find and row filter only |
@@ -116,16 +120,20 @@ Key | Action
 `Ctrl + →` | Scroll right to last column
 `Ctrl + e` | Print the marked lines to stdout and exit
 `G` (or `End`) | Go to bottom
-`g` (or `Home`) | Go to top
+`gg` (or `Home`) | Go to top
 `<n>G` | Go to line `n`
+`gc` | Go to column by name (fuzzy match; Tab completes)
 `/<regex>` | Find content matching regex and highlight matches
 `&` / `/` with `col=val` | Column-scoped filter / find (see [Features](#features))
 `:` | Open colon command line (see [Features](#features))
-`Tab` (in `:` / `&` / `/`) | Open fzf-style completion picker
+`Tab` (in `:` / `&` / `/` / `gc`) | Open fzf-style completion picker
 `n` (in Find mode) | Jump to next result
 `N` (in Find mode) | Jump to previous result
 `&<regex>` | Filter rows using regex (show only matches)
 `*<regex>` | Filter columns using regex (show only matches)
+`zh` | Toggle hide on the selected (or current) column
+`za` (or `zr`) | Show all columns
+`zo` | Hide all columns except the selected (or current) one
 `TAB` | Toggle between row, column or cell selection modes
 `>` | Increase selected column's width
 `<` | Decrease selected column's width

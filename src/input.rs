@@ -36,9 +36,19 @@ pub enum Control {
     FreezeColumns(usize),
     /// Parsed `:` command (see [`crate::command`]).
     Command(ColonCommand),
+    /// Jump to column by fuzzy-matched name (`gc` prompt).
+    GotoColumn(String),
+    /// Toggle hide on selected/current column (`zh` / `:hide`).
+    ToggleHideColumn,
+    /// Show all columns (`za` / `zr` / `:show`).
+    ShowAllColumns,
+    /// Hide all columns except selected/current (`zo` / `:only`).
+    HideAllExceptSelectedColumn,
     Quit,
     BufferContent(Input),
     BufferReset,
+    /// Clear the status-line input buffer without resetting filters.
+    ClearInputBuffer,
     Select,
     CopySelection,
     SelectMarks,
@@ -165,8 +175,16 @@ impl InputHandler {
                 KeyCode::Char('k') | KeyCode::Up => Control::ScrollUp,
                 KeyCode::Char('l') | KeyCode::Right => Control::ScrollRight,
                 KeyCode::Char('h') | KeyCode::Left => Control::ScrollLeft,
-                KeyCode::Char('g') | KeyCode::Home => Control::ScrollTop,
+                KeyCode::Home => Control::ScrollTop,
                 KeyCode::End => Control::ScrollBottom,
+                KeyCode::Char('g') => {
+                    self.init_buffer(InputMode::GoPrefix);
+                    Control::empty_buffer()
+                }
+                KeyCode::Char('z') => {
+                    self.init_buffer(InputMode::ColumnVisibilityPrefix);
+                    Control::empty_buffer()
+                }
                 KeyCode::Char('n') => Control::ScrollToNextFound,
                 KeyCode::PageDown => Control::ScrollPageDown,
                 KeyCode::PageUp => Control::ScrollPageUp,
@@ -245,9 +263,17 @@ impl InputHandler {
         if self.mode == InputMode::Option {
             return self.handler_buffering_option_mode(key_event);
         }
+        if self.mode == InputMode::GoPrefix {
+            return self.handler_go_prefix(key_event);
+        }
+        if self.mode == InputMode::ColumnVisibilityPrefix {
+            return self.handler_column_visibility_prefix(key_event);
+        }
         let completion_open = self.completion_open();
-        let in_complete_mode =
-            matches!(self.mode, InputMode::Command | InputMode::Filter | InputMode::Find);
+        let in_complete_mode = matches!(
+            self.mode,
+            InputMode::Command | InputMode::Filter | InputMode::Find | InputMode::GotoColumn
+        );
 
         match key_event.code {
             KeyCode::Esc if completion_open => {
@@ -352,6 +378,8 @@ impl InputHandler {
                     }
                 } else if mode == InputMode::FilterColumns {
                     Control::FilterColumns(value.clone())
+                } else if mode == InputMode::GotoColumn {
+                    Control::GotoColumn(value.clone())
                 } else if mode == InputMode::Command {
                     match command::parse_colon_command(&value) {
                         Ok(cmd) => Control::Command(cmd),
@@ -421,6 +449,14 @@ impl InputHandler {
         let current = self.active_buffer_value();
         let line_for_complete = match self.mode {
             InputMode::Command => current,
+            InputMode::GotoColumn => {
+                // Reuse `:gc` column completion.
+                if current.is_empty() {
+                    "gc ".to_string()
+                } else {
+                    format!("gc {current}")
+                }
+            }
             InputMode::Filter | InputMode::Find => {
                 if current.is_empty() {
                     "filter ".to_string()
@@ -466,16 +502,71 @@ impl InputHandler {
 
     fn apply_completion_line(&mut self, line: &str) -> Control {
         let new_value = match self.mode {
-            InputMode::Filter | InputMode::Find => line
-                .strip_prefix("filter ")
-                .unwrap_or(line)
-                .to_string(),
+            InputMode::Filter | InputMode::Find => {
+                line.strip_prefix("filter ").unwrap_or(line).to_string()
+            }
+            InputMode::GotoColumn => line.strip_prefix("gc ").unwrap_or(line).to_string(),
             _ => line.to_string(),
         };
         let cursor = new_value.len();
         let new_input = Input::new(new_value).with_cursor(cursor);
         self.buffer_state = BufferState::Active(new_input.clone());
         Control::BufferContent(new_input)
+    }
+
+    fn handler_go_prefix(&mut self, key_event: KeyEvent) -> Control {
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Backspace => {
+                self.reset_buffer();
+                Control::ClearInputBuffer
+            }
+            // `gc` — go to column by name
+            KeyCode::Char('c') => {
+                self.init_buffer(InputMode::GotoColumn);
+                Control::empty_buffer()
+            }
+            // `gg` or Enter — go to top (vim-style)
+            KeyCode::Char('g') | KeyCode::Enter => {
+                self.reset_buffer();
+                Control::ScrollTop
+            }
+            _ => {
+                self.reset_buffer();
+                Control::ScrollTop
+            }
+        }
+    }
+
+    fn handler_column_visibility_prefix(&mut self, key_event: KeyEvent) -> Control {
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Backspace => {
+                self.reset_buffer();
+                Control::ClearInputBuffer
+            }
+            // `zh` — toggle hide on selected/current column
+            KeyCode::Char('h') => {
+                self.reset_buffer();
+                Control::ToggleHideColumn
+            }
+            // `za` / `zr` — show all columns
+            KeyCode::Char('a') | KeyCode::Char('r') => {
+                self.reset_buffer();
+                Control::ShowAllColumns
+            }
+            // `zo` — hide all except selected/current column
+            KeyCode::Char('o') => {
+                self.reset_buffer();
+                Control::HideAllExceptSelectedColumn
+            }
+            KeyCode::Char(x) => {
+                self.reset_buffer();
+                Control::UnknownOption(format!("z{x}"))
+            }
+            _ => {
+                self.reset_buffer();
+                Control::ClearInputBuffer
+            }
+        }
     }
 
     fn handler_buffering_option_mode(&mut self, key_event: KeyEvent) -> Control {

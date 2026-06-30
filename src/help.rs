@@ -71,7 +71,12 @@ fn help_lines(p: &HelpPalette) -> Vec<Line<'static>> {
             Span::styled(desc.to_string(), p.desc),
         ])
     };
-    let note = |text: &str| Line::from(vec![Span::raw("  "), Span::styled(text.to_string(), p.hint)]);
+    let note = |text: &str| {
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(text.to_string(), p.hint),
+        ])
+    };
     let example = |text: &str| {
         Line::from(vec![
             Span::raw("    "),
@@ -83,7 +88,9 @@ fn help_lines(p: &HelpPalette) -> Vec<Line<'static>> {
         Span::styled("  csvlens", p.title),
         Span::styled("  —  interactive CSV viewer", p.hint),
     ]));
-    lines.push(note("Press q or Esc to close this help ·  j/k or ↑/↓ to scroll"));
+    lines.push(note(
+        "Press q or Esc to close this help ·  j/k or ↑/↓ to scroll",
+    ));
     lines.push(blank());
 
     lines.push(section("Moving"));
@@ -94,9 +101,10 @@ fn help_lines(p: &HelpPalette) -> Vec<Line<'static>> {
     lines.push(binding("Ctrl+u  /  u", "Scroll half window up"));
     lines.push(binding("Ctrl+h / Ctrl+l", "Scroll one window left / right"));
     lines.push(binding("Ctrl+← / Ctrl+→", "Jump to first / last column"));
-    lines.push(binding("g  /  Home", "Go to top"));
+    lines.push(binding("gg  /  Home", "Go to top"));
     lines.push(binding("G  /  End", "Go to bottom"));
     lines.push(binding("<n>G", "Go to line n"));
+    lines.push(binding("gc", "Go to column by name (fuzzy match)"));
     lines.push(blank());
 
     lines.push(section("Search & filter"));
@@ -104,16 +112,38 @@ fn help_lines(p: &HelpPalette) -> Vec<Line<'static>> {
     lines.push(binding("n / N", "Next / previous match"));
     lines.push(binding("&<regex>", "Filter rows (regex on any cell)"));
     lines.push(binding("*<regex>", "Filter columns by header regex"));
-    lines.push(binding("Tab  (in :  &  /)", "Open completion picker (fzf-style)"));
+    lines.push(binding(
+        "Tab  (in :  &  /  gc)",
+        "Open completion picker (fzf-style)",
+    ));
     lines.push(note("Picker: ↑↓ or Tab cycle · Enter accept · Esc dismiss"));
     lines.push(blank());
 
+    lines.push(section("Column visibility"));
+    lines.push(binding("zh", "Toggle hide on selected / current column"));
+    lines.push(binding("za  /  zr", "Show all columns"));
+    lines.push(binding("zo", "Hide all except selected / current column"));
+    lines.push(blank());
+
     lines.push(section("Colon commands  (:)"));
-    lines.push(binding(":filter <expr>", "Column-scoped filter (AND clauses)"));
+    lines.push(binding(
+        ":filter <expr>",
+        "Column-scoped filter (AND clauses)",
+    ));
     lines.push(binding(":find <expr>", "Column-scoped find / highlight"));
-    lines.push(binding(":columns a,b,\"Name\"", "Show only these columns (or regex)"));
-    lines.push(binding(":sort [+|-]<col>", "Sort ascending (+) or descending (-)"));
+    lines.push(binding(
+        ":columns a,b,\"Name\"",
+        "Show only these columns (or regex)",
+    ));
+    lines.push(binding(
+        ":sort [+|-]<col>",
+        "Sort ascending (+) or descending (-)",
+    ));
     lines.push(binding(":goto <n>", "Jump to line n"));
+    lines.push(binding(":gc <name>", "Jump to column by name (fuzzy)"));
+    lines.push(binding(":hide", "Toggle hide on selected / current column"));
+    lines.push(binding(":show", "Show all columns"));
+    lines.push(binding(":only", "Show only selected / current column"));
     lines.push(binding(":theme <name>", "Switch color theme"));
     lines.push(binding(":clear", "Clear filters, find, columns, sort"));
     lines.push(binding(":help  /  :q", "This help / quit"));
@@ -134,17 +164,29 @@ fn help_lines(p: &HelpPalette) -> Vec<Line<'static>> {
     lines.push(binding(">  /  <", "Widen / narrow selected column"));
     lines.push(binding("Shift+↓  /  J", "Sort by column (auto type)"));
     lines.push(binding("Ctrl+j", "Natural sort (file2 < file10)"));
-    lines.push(binding("#  (cell mode)", "Find rows equal to selected cell"));
-    lines.push(binding("@  (cell mode)", "Filter rows equal to selected cell"));
+    lines.push(binding(
+        "#  (cell mode)",
+        "Find rows equal to selected cell",
+    ));
+    lines.push(binding(
+        "@  (cell mode)",
+        "Filter rows equal to selected cell",
+    ));
     lines.push(binding("y", "Copy selection to clipboard"));
-    lines.push(binding("Enter  (cell mode)", "Print cell to stdout and exit"));
+    lines.push(binding(
+        "Enter  (cell mode)",
+        "Print cell to stdout and exit",
+    ));
     lines.push(blank());
 
     lines.push(section("Other"));
     lines.push(binding("-S / -W", "Wrap by chars / words"));
     lines.push(binding("f<n>", "Freeze n columns from the left"));
     lines.push(binding("m / M", "Toggle mark on row / clear all marks"));
-    lines.push(binding("Ctrl+e", "Print marked rows (with header) and exit"));
+    lines.push(binding(
+        "Ctrl+e",
+        "Print marked rows (with header) and exit",
+    ));
     lines.push(binding("r", "Reset view (filters, widths, …)"));
     lines.push(binding("H  /  ?", "Show this help"));
     lines.push(binding("q", "Quit"));

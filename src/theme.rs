@@ -159,18 +159,16 @@ impl Theme {
     /// Load a theme from a TOML file.
     pub fn from_file(path: impl AsRef<Path>) -> CsvlensResult<Self> {
         let path = path.as_ref();
-        let contents = std::fs::read_to_string(path).map_err(|e| {
-            CsvlensError::ThemeLoadError(format!("{}: {e}", path.display()))
-        })?;
-        Theme::from_toml(&contents).map_err(|e| {
-            CsvlensError::ThemeLoadError(format!("{}: {e}", path.display()))
-        })
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| CsvlensError::ThemeLoadError(format!("{}: {e}", path.display())))?;
+        Theme::from_toml(&contents)
+            .map_err(|e| CsvlensError::ThemeLoadError(format!("{}: {e}", path.display())))
     }
 
     /// Parse a theme from TOML text. Missing fields fall back to the dark theme.
     pub fn from_toml(toml_str: &str) -> CsvlensResult<Self> {
-        let def: ThemeFile = toml::from_str(toml_str)
-            .map_err(|e| CsvlensError::ThemeLoadError(e.to_string()))?;
+        let def: ThemeFile =
+            toml::from_str(toml_str).map_err(|e| CsvlensError::ThemeLoadError(e.to_string()))?;
         def.into_theme()
     }
 }
@@ -209,12 +207,10 @@ fn read_config_theme() -> CsvlensResult<Option<String>> {
     if !path.exists() {
         return Ok(None);
     }
-    let contents = std::fs::read_to_string(&path).map_err(|e| {
-        CsvlensError::ThemeLoadError(format!("config {}: {e}", path.display()))
-    })?;
-    let cfg: UserConfig = toml::from_str(&contents).map_err(|e| {
-        CsvlensError::ThemeLoadError(format!("config {}: {e}", path.display()))
-    })?;
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|e| CsvlensError::ThemeLoadError(format!("config {}: {e}", path.display())))?;
+    let cfg: UserConfig = toml::from_str(&contents)
+        .map_err(|e| CsvlensError::ThemeLoadError(format!("config {}: {e}", path.display())))?;
     Ok(cfg.theme.filter(|s| !s.trim().is_empty()))
 }
 
@@ -363,9 +359,7 @@ fn parse_color(input: &str) -> Result<Color, String> {
     }
 
     named_color(&lower).ok_or_else(|| {
-        format!(
-            "unknown color '{s}'; use #hex, rgb(r,g,b), colorN, or a named ANSI color"
-        )
+        format!("unknown color '{s}'; use #hex, rgb(r,g,b), colorN, or a named ANSI color")
     })
 }
 
@@ -452,18 +446,12 @@ mod tests {
     fn parse_hex_colors() {
         assert_eq!(parse_color("#f00").unwrap(), Color::Rgb(255, 0, 0));
         assert_eq!(parse_color("#00ff00").unwrap(), Color::Rgb(0, 255, 0));
-        assert_eq!(
-            parse_color("#0000ff80").unwrap(),
-            Color::Rgb(0, 0, 255)
-        );
+        assert_eq!(parse_color("#0000ff80").unwrap(), Color::Rgb(0, 0, 255));
     }
 
     #[test]
     fn parse_rgb_and_named() {
-        assert_eq!(
-            parse_color("rgb(1, 2, 3)").unwrap(),
-            Color::Rgb(1, 2, 3)
-        );
+        assert_eq!(parse_color("rgb(1, 2, 3)").unwrap(), Color::Rgb(1, 2, 3));
         assert_eq!(parse_color("LightYellow").unwrap(), Color::LightYellow);
         assert_eq!(parse_color("color42").unwrap(), Color::Indexed(42));
         assert_eq!(parse_color("7").unwrap(), Color::Indexed(7));
@@ -550,11 +538,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let themes = dir.path().join("themes");
         std::fs::create_dir_all(&themes).unwrap();
-        std::fs::write(
-            themes.join("mine.toml"),
-            r##"header = "#112233""##,
-        )
-        .unwrap();
+        std::fs::write(themes.join("mine.toml"), r##"header = "#112233""##).unwrap();
         std::fs::write(dir.path().join("config.toml"), "theme = \"mine\"\n").unwrap();
 
         unsafe {

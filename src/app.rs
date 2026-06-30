@@ -1,6 +1,6 @@
 extern crate csv_nose;
 
-use crate::columns_filter::ColumnsFilter;
+use crate::columns_filter::{self, ColumnsFilter};
 use crate::csv;
 use crate::delimiter::{Delimiter, sniff_delimiter};
 use crate::errors::{CsvlensError, CsvlensResult};
@@ -322,10 +322,16 @@ impl App {
         loop {
             let control = self.input_handler.next();
             if matches!(control, Control::Quit)
-                || matches!(control, Control::Command(crate::command::ColonCommand::Quit))
+                || matches!(
+                    control,
+                    Control::Command(crate::command::ColonCommand::Quit)
+                )
             {
                 if self.help_page_state.is_active()
-                    && !matches!(control, Control::Command(crate::command::ColonCommand::Quit))
+                    && !matches!(
+                        control,
+                        Control::Command(crate::command::ColonCommand::Quit)
+                    )
                 {
                     self.help_page_state.deactivate();
                     self.input_handler.exit_help_mode();
@@ -508,6 +514,18 @@ impl App {
             Control::FilterColumns(pat) => {
                 self.set_columns_filter(pat);
             }
+            Control::GotoColumn(name) => {
+                self.handle_goto_column(name);
+            }
+            Control::ToggleHideColumn => {
+                self.handle_toggle_hide_column();
+            }
+            Control::ShowAllColumns => {
+                self.handle_show_all_columns();
+            }
+            Control::HideAllExceptSelectedColumn => {
+                self.handle_hide_all_except_selected_column();
+            }
             Control::FreezeColumns(num_cols) => {
                 self.rows_view.set_cols_offset_num_freeze(*num_cols as u64);
                 self.csv_table_state.reset_buffer();
@@ -520,6 +538,14 @@ impl App {
                 self.csv_table_state.reset_buffer();
                 self.reset_filter(true);
                 self.reset_columns_filter();
+            }
+            Control::ClearInputBuffer => {
+                self.csv_table_state.reset_buffer();
+            }
+            Control::ScrollTop | Control::ScrollBottom => {
+                // Clear leftover prefix prompts (e.g. after `gg`).
+                self.csv_table_state.reset_buffer();
+                // Fall through — scroll handlers are also in the big match below.
             }
             Control::ToggleSelectionType => {
                 self.rows_view.selection.toggle_selection_type();
@@ -898,11 +924,22 @@ impl App {
             ColonCommand::Goto(n) => {
                 self.rows_view.set_rows_from(n.saturating_sub(1) as u64)?;
             }
+            ColonCommand::GotoColumn(name) => {
+                self.handle_goto_column(name);
+            }
+            ColonCommand::HideColumn => {
+                self.handle_toggle_hide_column();
+            }
+            ColonCommand::ShowAllColumns => {
+                self.handle_show_all_columns();
+            }
+            ColonCommand::HideAllExceptSelected => {
+                self.handle_hide_all_except_selected_column();
+            }
             ColonCommand::Theme(spec) => match crate::theme::Theme::resolve(spec) {
                 Ok(theme) => {
                     self.csv_table_state.theme = theme;
-                    self.transient_message
-                        .replace(format!("Theme: {spec}"));
+                    self.transient_message.replace(format!("Theme: {spec}"));
                 }
                 Err(e) => {
                     self.transient_message.replace(format!("{e}"));
@@ -948,9 +985,8 @@ impl App {
             }
             ColonCommand::Sort { column, descending } => {
                 if self.shared_config.is_streaming() {
-                    self.transient_message.replace(
-                        "Sorting is not supported when data is still streaming".into(),
-                    );
+                    self.transient_message
+                        .replace("Sorting is not supported when data is still streaming".into());
                 } else {
                     let name = crate::command::unquote_column(column);
                     let headers = self.rows_view.raw_headers().clone();
@@ -972,8 +1008,7 @@ impl App {
                                 sort::SortType::Auto,
                             ));
                             self.sorter = Some(sorter);
-                            self.rows_view
-                                .set_sorter(self.sorter.as_ref().unwrap())?;
+                            self.rows_view.set_sorter(self.sorter.as_ref().unwrap())?;
                             self.transient_message.replace(format!(
                                 "Sort {} by {}",
                                 if *descending { "desc" } else { "asc" },
@@ -1038,8 +1073,7 @@ impl App {
         let re = self.create_regex(pat, false);
         if let Ok(target) = re {
             let columns_filter = Arc::new(ColumnsFilter::new(target, self.rows_view.raw_headers()));
-            self.columns_filter = Some(columns_filter.clone());
-            self.rows_view.set_columns_filter(&columns_filter).unwrap();
+            self.apply_columns_filter(columns_filter);
         } else {
             self.reset_columns_filter();
             self.transient_message = Some(format!("Invalid regex: {pat}"));
@@ -1049,9 +1083,187 @@ impl App {
             .set_cols_offset(ColumnsOffset::default());
     }
 
+    fn apply_columns_filter(&mut self, columns_filter: Arc<ColumnsFilter>) {
+        if columns_filter.shows_all_columns() && columns_filter.pattern().is_none() {
+            self.reset_columns_filter();
+            return;
+        }
+        self.columns_filter = Some(columns_filter.clone());
+        self.rows_view.set_columns_filter(&columns_filter).unwrap();
+        // Horizontal scroll / selection may point past the new column count.
+        self.rows_view.set_cols_offset_num_skip(
+            self.rows_view
+                .cols_offset()
+                .num_skip
+                .min(self.rows_view.max_cols_offset_num_skip()),
+        );
+        self.csv_table_state
+            .set_cols_offset(self.rows_view.cols_offset());
+        self.rows_view
+            .selection
+            .column
+            .set_bound(self.rows_view.headers().len() as u64);
+    }
+
     fn reset_columns_filter(&mut self) {
         self.columns_filter = None;
         self.rows_view.reset_columns_filter().unwrap();
+    }
+
+    /// Origin index of the selected column, or the first non-frozen visible column when
+    /// only row selection is active.
+    fn get_active_column_origin_index(&self) -> Option<usize> {
+        if let Some(global) = self.get_global_selected_column_index() {
+            return Some(global as usize);
+        }
+        let offset = self.rows_view.cols_offset();
+        let filtered_index = offset.num_freeze.saturating_add(offset.num_skip) as usize;
+        self.rows_view
+            .headers()
+            .get(filtered_index)
+            .map(|h| h.origin_index)
+    }
+
+    fn handle_goto_column(&mut self, name: &str) {
+        self.csv_table_state.reset_buffer();
+        let headers: Vec<String> = self
+            .rows_view
+            .headers()
+            .iter()
+            .map(|h| h.name.clone())
+            .collect();
+        match columns_filter::fuzzy_match_column(name, &headers) {
+            Some(filtered_index) => {
+                self.scroll_to_filtered_column(filtered_index as u64);
+            }
+            None => {
+                self.transient_message = Some(format!("No column matching \"{name}\""));
+            }
+        }
+    }
+
+    fn scroll_to_filtered_column(&mut self, filtered_column_index: u64) {
+        let cols_offset = self.rows_view.cols_offset();
+        if !cols_offset.is_filtered_column_index_visible(
+            filtered_column_index,
+            self.csv_table_state.num_cols_rendered,
+        ) {
+            let num_skip = cols_offset.get_num_skip_to_make_visible(filtered_column_index);
+            self.rows_view.set_cols_offset_num_skip(num_skip);
+            self.csv_table_state
+                .set_cols_offset(self.rows_view.cols_offset());
+        }
+        // Update column selection when in column/cell mode; also remember for later toggles.
+        let viewport_index = Self::filtered_to_viewport_column_index(
+            self.rows_view.cols_offset(),
+            filtered_column_index,
+        );
+        match self.rows_view.selection.selection_type() {
+            SelectionType::Column | SelectionType::Cell => {
+                self.rows_view.selection.column.set_index(viewport_index);
+            }
+            SelectionType::Row | SelectionType::None => {
+                // Store as last_selected so TAB into column mode lands on this column.
+                self.rows_view.selection.column.set_index(viewport_index);
+                self.rows_view.selection.column.unset_index();
+            }
+        }
+    }
+
+    fn filtered_to_viewport_column_index(
+        cols_offset: ColumnsOffset,
+        filtered_column_index: u64,
+    ) -> u64 {
+        if filtered_column_index < cols_offset.num_freeze {
+            filtered_column_index
+        } else {
+            filtered_column_index.saturating_sub(cols_offset.num_skip)
+        }
+    }
+
+    fn handle_toggle_hide_column(&mut self) {
+        self.csv_table_state.reset_buffer();
+        let Some(origin_index) = self.get_active_column_origin_index() else {
+            self.transient_message = Some("No column to hide".to_string());
+            return;
+        };
+        let headers = self.rows_view.raw_headers();
+        match ColumnsFilter::toggle_origin_index(
+            origin_index,
+            headers,
+            self.columns_filter.as_deref(),
+        ) {
+            Some(cf) => {
+                let name = headers.get(origin_index).cloned().unwrap_or_default();
+                let was_visible = self
+                    .columns_filter
+                    .as_ref()
+                    .map(|c| c.is_column_filtered(origin_index) || c.disabled_because_no_match())
+                    .unwrap_or(true);
+                self.apply_columns_filter(Arc::new(cf));
+                if was_visible {
+                    self.transient_message = Some(format!("Hidden column \"{name}\""));
+                    self.ensure_column_selection_valid();
+                } else {
+                    self.transient_message = Some(format!("Shown column \"{name}\""));
+                }
+            }
+            None => {
+                self.transient_message = Some("Cannot hide the only visible column".to_string());
+            }
+        }
+    }
+
+    fn handle_show_all_columns(&mut self) {
+        self.csv_table_state.reset_buffer();
+        if self.columns_filter.is_some() {
+            self.reset_columns_filter();
+            self.transient_message = Some("Showing all columns".to_string());
+        }
+    }
+
+    fn handle_hide_all_except_selected_column(&mut self) {
+        self.csv_table_state.reset_buffer();
+        let Some(origin_index) = self.get_active_column_origin_index() else {
+            self.transient_message = Some("No column selected".to_string());
+            return;
+        };
+        let headers = self.rows_view.raw_headers();
+        let name = headers.get(origin_index).cloned().unwrap_or_default();
+        let cf = ColumnsFilter::only_indices(vec![origin_index], headers);
+        self.apply_columns_filter(Arc::new(cf));
+        self.rows_view.set_cols_offset_num_skip(0);
+        self.csv_table_state
+            .set_cols_offset(self.rows_view.cols_offset());
+        if matches!(
+            self.rows_view.selection.selection_type(),
+            SelectionType::Column | SelectionType::Cell
+        ) {
+            self.rows_view.selection.column.set_index(0);
+        }
+        self.transient_message = Some(format!("Showing only column \"{name}\""));
+    }
+
+    fn ensure_column_selection_valid(&mut self) {
+        let num_headers = self.rows_view.headers().len() as u64;
+        if num_headers == 0 {
+            return;
+        }
+        self.rows_view.selection.column.set_bound(num_headers);
+        if let Some(i) = self.rows_view.selection.column.index()
+            && i >= num_headers
+        {
+            self.rows_view
+                .selection
+                .column
+                .set_index(num_headers.saturating_sub(1));
+        }
+        let max_skip = self.rows_view.max_cols_offset_num_skip();
+        if self.rows_view.cols_offset().num_skip > max_skip {
+            self.rows_view.set_cols_offset_num_skip(max_skip);
+            self.csv_table_state
+                .set_cols_offset(self.rows_view.cols_offset());
+        }
     }
 
     fn handle_find_or_filter(&mut self, pat: &str, is_filter: bool, escape: bool) {
@@ -1180,10 +1392,14 @@ impl App {
 
         // Re-apply columns filter if any
         if let Some(columns_filter) = &self.columns_filter {
-            let columns_filter = Arc::new(ColumnsFilter::new(
-                columns_filter.pattern(),
-                self.rows_view.raw_headers(),
-            ));
+            let columns_filter = if let Some(pattern) = columns_filter.pattern() {
+                Arc::new(ColumnsFilter::new(pattern, self.rows_view.raw_headers()))
+            } else {
+                Arc::new(ColumnsFilter::from_indices(
+                    columns_filter.indices().clone(),
+                    self.rows_view.raw_headers(),
+                ))
+            };
             self.columns_filter = Some(columns_filter.clone());
             self.rows_view.set_columns_filter(&columns_filter).unwrap();
         }
@@ -3494,5 +3710,74 @@ mod tests {
         let actual_buffer = terminal.backend().buffer().clone();
         let lines = to_lines(&actual_buffer);
         assert_eq!(lines, expected);
+    }
+
+    #[test]
+    fn test_goto_column_by_name() {
+        let mut app = AppBuilder::new("tests/data/cities.csv").build().unwrap();
+        till_app_ready(&app);
+
+        let backend = TestBackend::new(50, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        step_and_draw(&mut app, &mut terminal, Control::Nothing);
+        step_and_draw(&mut app, &mut terminal, Control::ToggleSelectionType);
+        step_and_draw(&mut app, &mut terminal, Control::GotoColumn("City".into()));
+
+        // City is the 9th column (index 8); after scrolling it should be selected.
+        assert!(app.rows_view.selection.column.index().is_some());
+        let headers: Vec<_> = app
+            .rows_view
+            .headers()
+            .iter()
+            .map(|h| h.name.as_str())
+            .collect();
+        assert!(headers.iter().any(|h| *h == "City"));
+        let city_idx = headers.iter().position(|h| *h == "City").unwrap();
+        let viewport = app.rows_view.selection.column.index().unwrap();
+        let filtered = app
+            .rows_view
+            .cols_offset()
+            .get_filtered_column_index(viewport) as usize;
+        assert_eq!(filtered, city_idx);
+    }
+
+    #[test]
+    fn test_toggle_hide_column_and_show_all() {
+        let mut app = AppBuilder::new("tests/data/cities.csv").build().unwrap();
+        till_app_ready(&app);
+
+        let backend = TestBackend::new(50, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        step_and_draw(&mut app, &mut terminal, Control::Nothing);
+        step_and_draw(&mut app, &mut terminal, Control::ToggleSelectionType);
+        // Hide first column (LatD)
+        step_and_draw(&mut app, &mut terminal, Control::ToggleHideColumn);
+        assert_eq!(app.rows_view.headers().len(), 9);
+        assert_ne!(app.rows_view.headers()[0].name, "LatD");
+
+        step_and_draw(&mut app, &mut terminal, Control::ShowAllColumns);
+        assert_eq!(app.rows_view.headers().len(), 10);
+        assert_eq!(app.rows_view.headers()[0].name, "LatD");
+    }
+
+    #[test]
+    fn test_hide_all_except_selected_column() {
+        let mut app = AppBuilder::new("tests/data/cities.csv").build().unwrap();
+        till_app_ready(&app);
+
+        let backend = TestBackend::new(50, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        step_and_draw(&mut app, &mut terminal, Control::Nothing);
+        step_and_draw(&mut app, &mut terminal, Control::ToggleSelectionType);
+        step_and_draw(
+            &mut app,
+            &mut terminal,
+            Control::HideAllExceptSelectedColumn,
+        );
+        assert_eq!(app.rows_view.headers().len(), 1);
+        assert_eq!(app.rows_view.headers()[0].name, "LatD");
+
+        step_and_draw(&mut app, &mut terminal, Control::Reset);
+        assert_eq!(app.rows_view.headers().len(), 10);
     }
 }
