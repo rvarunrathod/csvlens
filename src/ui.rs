@@ -743,6 +743,9 @@ impl<'a> CsvTable<'a> {
             let get_prefix = |&input_mode| -> String {
                 match input_mode {
                     InputMode::GotoLine => "Go to line: ".into(),
+                    InputMode::GotoColumn => "Go to column: ".into(),
+                    InputMode::GoPrefix => "g".into(),
+                    InputMode::ColumnVisibilityPrefix => "z".into(),
                     InputMode::Find => "Find: ".into(),
                     InputMode::Filter => "Filter: ".into(),
                     InputMode::FilterColumns => "Columns regex: ".into(),
@@ -1027,10 +1030,7 @@ impl CsvTable<'_> {
 
         let width = full_area.width.clamp(24, 60.min(full_area.width.max(24)));
         let x = full_area.x;
-        let y = status_area
-            .y
-            .saturating_sub(popup_h)
-            .max(full_area.y);
+        let y = status_area.y.saturating_sub(popup_h).max(full_area.y);
 
         let popup = Rect::new(x, y, width, popup_h);
 
@@ -1045,9 +1045,7 @@ impl CsvTable<'_> {
         }
 
         let border = Style::default().fg(state.theme.border);
-        let normal = Style::default()
-            .fg(state.theme.status)
-            .bg(Color::Black);
+        let normal = Style::default().fg(state.theme.status).bg(Color::Black);
         let selected_style = Style::default()
             .fg(state.theme.selected_foreground)
             .bg(state.theme.selected_background)
@@ -1277,7 +1275,7 @@ impl FilterColumnsState {
     pub fn from_rows_view(rows_view: &view::RowsView) -> Self {
         if let Some(columns_filter) = rows_view.columns_filter() {
             Self::Enabled(FilterColumnsInfo {
-                pattern: columns_filter.pattern(),
+                label: columns_filter.status_label(),
                 shown: columns_filter.num_filtered(),
                 total: columns_filter.num_original(),
                 disabled_because_no_match: columns_filter.disabled_because_no_match(),
@@ -1289,7 +1287,7 @@ impl FilterColumnsState {
 }
 
 pub struct FilterColumnsInfo {
-    pattern: Regex,
+    label: String,
     shown: usize,
     total: usize,
     disabled_because_no_match: bool,
@@ -1298,7 +1296,7 @@ pub struct FilterColumnsInfo {
 impl FilterColumnsInfo {
     fn status_line(&self) -> String {
         let mut line;
-        line = format!("[Filter \"{}\": ", self.pattern);
+        line = format!("[Filter \"{}\": ", self.label);
         if self.disabled_because_no_match {
             line += "no match, showing all columns]";
         } else {

@@ -604,12 +604,13 @@ impl FinderInternalState {
                             {
                                 continue;
                             }
-                            let should_check_regex =
-                                if let Some(target_local_column_index) = target_local_column_index {
-                                    local_column_index == target_local_column_index
-                                } else {
-                                    true
-                                };
+                            let should_check_regex = if let Some(target_local_column_index) =
+                                target_local_column_index
+                            {
+                                local_column_index == target_local_column_index
+                            } else {
+                                true
+                            };
                             if should_check_regex && target.is_match(field) {
                                 column_indices.push(local_column_index);
                             }
