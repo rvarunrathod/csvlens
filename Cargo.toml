@@ -40,6 +40,8 @@ ansi-to-tui = "8.0.1"
 clap-cargo = {version = "0.18.3", optional = true}
 csv-core = "0.1.13"
 rand = { version = "0.10", optional = true }
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1.2"
 
 [target.'cfg(windows)'.dependencies]
 crossterm = "0.28"

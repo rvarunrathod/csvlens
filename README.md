@@ -5,6 +5,89 @@ for CSV.
 
 ![Demo](.github/demo.gif)
 
+## Features
+
+| Area | What you get |
+| --- | --- |
+| **Navigation** | Vim-style movement, page/half-page scroll, goto line, freeze columns, line wrap |
+| **Search** | Regex find (`/`) and row filter (`&`), next/previous match, column header filter (`*`) |
+| **Column-aware filter / find** | Expressions scoped to columns with `=`, `!=`, `~` (contains), `>`, `<`, `:empty` / `:null`; stack clauses with AND |
+| **Colon command line (`:`)** | Palette-style commands: `:filter`, `:find`, `:columns`, `:sort`, `:goto`, `:theme`, `:clear`, `:help`, `:q` |
+| **fzf-style completion** | Tab in `:` / `&` / `/` opens a floating picker for commands and column names (↑↓ / Tab cycle, Enter accept, Esc dismiss); handles names with spaces via quotes |
+| **Selection** | Row / column / cell modes, resize columns, sort (typed + natural), mark rows, copy, echo cell |
+| **Themes** | Built-in `auto` / `dark` / `light`, user TOML themes, default via `config.toml` or `CSVLENS_THEME`, themed headers and UI chrome |
+| **Help** | Scrollable in-app help card (`H` / `?` / `:help`) with sectioned key reference |
+| **Streaming & reload** | Pipe stdin, optional `--auto-reload` when the file changes on disk |
+| **Library API** | Embed via `CsvlensOptions` / `run_csvlens_with_options` (optional `Theme`) |
+
+### Column filter expressions
+
+Works in **`:`** commands and, when the text looks like an expression, in **`&`** (filter) and **`/`** (find):
+
+```text
+:filter status=error
+:filter status!=ok severity>3
+:filter "First Name"~Ann and email:empty
+:find name~smith
+&status:failed age<30          # status:failed is sugar for status=failed
+```
+
+| Operator | Meaning | Example |
+| --- | --- | --- |
+| `=` | Exact match | `status=error` |
+| `!=` | Not equal | `status!=ok` |
+| `~` or `contains` | Substring | `name~Ann` |
+| `>` / `<` | Numeric compare | `age>30` |
+| `:empty` / `:null` | Empty or null-like cell | `email:empty` |
+| `:value` | Sugar for `=` | `status:failed` |
+
+**Column names with spaces** — quote them so parsing and completion stay unambiguous:
+
+```text
+"First Name"=Alice
+'Order Date'>2020
+`user id`!=0
+```
+
+Tab completion inserts the correct quoting automatically (e.g. `First Name` → `"First Name"`). For `:columns`, only the segment **after the last comma** is completed so lists like `id,name,status` build correctly.
+
+### Colon commands
+
+Press **`:`** to open the command line (status shows a leading `:`).
+
+| Command | Description |
+| --- | --- |
+| `:filter <expr\|regex>` | Keep matching rows (expression or legacy whole-table regex) |
+| `:find <expr\|regex>` | Highlight matches |
+| `:columns a,b,"Name"` | Show only these columns (comma list or regex) |
+| `:sort [+|-]<column>` | Sort ascending (`+`, default) or descending (`-`) |
+| `:goto <n>` | Jump to line `n` |
+| `:theme <name\|path>` | Switch theme (same resolution as `--theme`) |
+| `:clear` | Clear find/filter, column filter, and sort |
+| `:filter` / `:find` alone | Clear find and row filter only |
+| `:help` / `:q` | Help overlay / quit |
+| `:export <path>` | Reserved (not implemented yet; use `Ctrl+e` for marked rows) |
+
+### Completion picker
+
+In **`:`**, **`&`**, or **`/`** mode, press **Tab** to open a floating **complete** menu (drawn above the table so grid separators do not clip names):
+
+- **Tab** / **↓** — next candidate (live preview in the command line)
+- **Shift+Tab** / **↑** — previous candidate
+- **Enter** — accept into the line and close the picker (Enter again runs the command)
+- **Esc** — close picker only; second Esc cancels the command line
+
+### Themes & config
+
+See `--theme` under [Optional parameters](#optional-parameters). Defaults live in:
+
+```toml
+# ~/.config/csvlens/config.toml
+theme = "grovbox-dark"
+```
+
+User themes: `~/.config/csvlens/themes/<name>.toml` (override root with `CSVLENS_CONFIG_DIR`).
+
 ## Usage
 
 Run `csvlens` by providing the CSV filename:
@@ -36,6 +119,9 @@ Key | Action
 `g` (or `Home`) | Go to top
 `<n>G` | Go to line `n`
 `/<regex>` | Find content matching regex and highlight matches
+`&` / `/` with `col=val` | Column-scoped filter / find (see [Features](#features))
+`:` | Open colon command line (see [Features](#features))
+`Tab` (in `:` / `&` / `/`) | Open fzf-style completion picker
 `n` (in Find mode) | Jump to next result
 `N` (in Find mode) | Jump to previous result
 `&<regex>` | Filter rows using regex (show only matches)
@@ -104,6 +190,61 @@ Key | Action
   ```
 
 * `--color-columns` (or `--colorful`): Display each column in a different color.
+
+* `--theme <theme>`: Color theme. Accepts a built-in name, a path to a TOML theme file, or a theme
+  name from the config themes directory. You do **not** need to pass this every time — set a default
+  instead (see below).
+
+  Built-in themes:
+  * `auto` — detect the terminal light/dark mode (fallback when nothing is configured)
+  * `dark`
+  * `light`
+
+  **Default theme (no flag required)** — priority order:
+  1. `--theme` on the command line
+  2. `CSVLENS_THEME` environment variable
+  3. `theme` in `~/.config/csvlens/config.toml`
+  4. `auto`
+
+  ```toml
+  # ~/.config/csvlens/config.toml
+  theme = "grovbox-dark"
+  ```
+
+  ```bash
+  export CSVLENS_THEME=grovbox-dark   # optional alternative to config.toml
+  csvlens data.csv                   # uses the configured theme
+  csvlens data.csv --theme light     # one-off override
+  ```
+
+  Theme files are TOML under `~/.config/csvlens/themes/<name>.toml`. All fields are optional and
+  fall back to the dark theme when omitted. Colors may be `#hex`, `rgb(r, g, b)`, ANSI names
+  (`red`, `lightyellow`, …), or indexed colors (`color42` or `42`).
+
+  ```toml
+  # ~/.config/csvlens/themes/nord.toml
+  name = "nord"
+  header = "#88c0d0"              # column header text color
+  row_number = "#4c566a"
+  border = "#4c566a"
+  selected_foreground = "#eceff4"
+  selected_background = "#3b4252"
+  marked_foreground = "#eceff4"
+  marked_background = "#434c5e"
+  found = "#bf616a"
+  found_selected_background = "lightyellow"
+  status = "#88c0d0"
+  column_colors = [
+    "#bf616a",
+    "#d08770",
+    "#ebcb8b",
+    "#a3be8c",
+    "#b48ead",
+  ]
+  ```
+
+  The config directory can be overridden with `CSVLENS_CONFIG_DIR` (reads `$CSVLENS_CONFIG_DIR/config.toml`
+  and `$CSVLENS_CONFIG_DIR/themes/`). Otherwise `$XDG_CONFIG_HOME/csvlens/` or `~/.config/csvlens/` is used.
 
 ## Installation
 

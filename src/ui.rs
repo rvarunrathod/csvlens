@@ -13,7 +13,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::Position;
 use ratatui::style::Styled;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::line;
 use ratatui::text::Text;
 use ratatui::text::{Line, Span};
@@ -453,8 +453,10 @@ impl<'a> CsvTable<'a> {
             let effective_width = min(remaining_width, hlen);
             let mut content_style = Style::default();
             if state.color_columns {
-                content_style = content_style
-                    .fg(state.theme.column_colors[col_index % state.theme.column_colors.len()]);
+                let colors = &state.theme.column_colors;
+                content_style = content_style.fg(colors[col_index % colors.len()]);
+            } else if matches!(row_type, RowType::Header) {
+                content_style = content_style.fg(state.theme.header);
             }
             if let RowType::Header = row_type {
                 content_style = content_style.add_modifier(Modifier::BOLD);
@@ -738,20 +740,16 @@ impl<'a> CsvTable<'a> {
             content = msg.to_owned();
         } else if let BufferState::Enabled(buffer_mode, input) = &state.buffer_content {
             prompt_text = Text::default();
-            let get_prefix = |&input_mode| {
-                let prefix = match input_mode {
-                    InputMode::GotoLine => "Go to line",
-                    InputMode::Find => "Find",
-                    InputMode::Filter => "Filter",
-                    InputMode::FilterColumns => "Columns regex",
-                    InputMode::Option => "Option",
-                    InputMode::FreezeColumns => "Number of columns to freeze",
-                    _ => "",
-                };
-                if prefix.is_empty() {
-                    "".to_string()
-                } else {
-                    format!("{prefix}: ")
+            let get_prefix = |&input_mode| -> String {
+                match input_mode {
+                    InputMode::GotoLine => "Go to line: ".into(),
+                    InputMode::Find => "Find: ".into(),
+                    InputMode::Filter => "Filter: ".into(),
+                    InputMode::FilterColumns => "Columns regex: ".into(),
+                    InputMode::Command => ":".into(),
+                    InputMode::Option => "Option: ".into(),
+                    InputMode::FreezeColumns => "Number of columns to freeze: ".into(),
+                    _ => String::new(),
                 }
             };
             let prefix = get_prefix(buffer_mode);
@@ -991,7 +989,141 @@ impl StatefulWidget for CsvTable<'_> {
         );
         self.render_status(status_area, buf, state);
 
+        // Table separators (row-number / freeze column) must be drawn *before* the
+        // completion popup, otherwise the vertical line cuts through candidates
+        // and hides the first character of each name.
         self.render_other_borders(buf, rows_area, state);
+
+        // fzf-style completion picker — drawn last so it fully overlays the grid.
+        self.render_completion_popup(area, status_area, buf, state);
+    }
+}
+
+impl CsvTable<'_> {
+    /// Floating completion menu (fzf-like): one candidate per line, selection highlight,
+    /// and `current/total` footer — keeps the command line itself uncluttered.
+    fn render_completion_popup(
+        &self,
+        full_area: Rect,
+        status_area: Rect,
+        buf: &mut Buffer,
+        state: &CsvTableState,
+    ) {
+        let n = state.completion_candidates.len();
+        if n == 0 || state.completion_index < 0 {
+            return;
+        }
+
+        let selected = state.completion_index as usize;
+        // Visible window size (leave room for border + footer).
+        let max_inner = 12usize;
+        let inner_h = n.min(max_inner) as u16;
+        let popup_h = inner_h.saturating_add(2); // top border + list; footer shares bottom border line
+        const STATUS_RESERVE: u16 = 2;
+        let popup_h = popup_h.min(full_area.height.saturating_sub(STATUS_RESERVE));
+        if popup_h < 2 {
+            return;
+        }
+
+        let width = full_area.width.clamp(24, 60.min(full_area.width.max(24)));
+        let x = full_area.x;
+        let y = status_area
+            .y
+            .saturating_sub(popup_h)
+            .max(full_area.y);
+
+        let popup = Rect::new(x, y, width, popup_h);
+
+        // Clear background
+        for row in popup.y..popup.bottom() {
+            for col in popup.x..popup.right() {
+                if let Some(cell) = buf.cell_mut((col, row)) {
+                    cell.set_symbol(" ");
+                    cell.set_style(Style::default().bg(Color::Black).fg(state.theme.status));
+                }
+            }
+        }
+
+        let border = Style::default().fg(state.theme.border);
+        let normal = Style::default()
+            .fg(state.theme.status)
+            .bg(Color::Black);
+        let selected_style = Style::default()
+            .fg(state.theme.selected_foreground)
+            .bg(state.theme.selected_background)
+            .add_modifier(Modifier::BOLD);
+        let footer_style = Style::default().fg(state.theme.row_number).bg(Color::Black);
+
+        // Scroll window so selection is visible
+        let list_h = popup.height.saturating_sub(2) as usize; // minus top title line and bottom footer
+        let list_h = list_h.max(1);
+        let scroll = if selected >= list_h {
+            selected + 1 - list_h
+        } else {
+            0
+        };
+
+        // Top border / title
+        let title = " complete ";
+        let top = format!(
+            "┌{title}{}┐",
+            "─".repeat(popup.width.saturating_sub(title.len() as u16 + 2) as usize)
+        );
+        buf.set_stringn(popup.x, popup.y, &top, popup.width as usize, border);
+
+        // Candidate rows
+        let list_y = popup.y.saturating_add(1);
+        for row_i in 0..list_h {
+            let cand_i = scroll + row_i;
+            let y = list_y.saturating_add(row_i as u16);
+            if y >= popup.bottom().saturating_sub(1) {
+                break;
+            }
+            let (text, style) = if cand_i < n {
+                let marker = if cand_i == selected { "▸ " } else { "  " };
+                let line = format!("{marker}{}", state.completion_candidates[cand_i]);
+                let style = if cand_i == selected {
+                    selected_style
+                } else {
+                    normal
+                };
+                (line, style)
+            } else {
+                (String::new(), normal)
+            };
+            // Side borders
+            buf.set_stringn(popup.x, y, "│", 1, border);
+            let inner_w = popup.width.saturating_sub(2) as usize;
+            // Fill row background for selection
+            for col in 1..popup.width.saturating_sub(1) {
+                if let Some(cell) = buf.cell_mut((popup.x + col, y)) {
+                    cell.set_style(style);
+                    cell.set_symbol(" ");
+                }
+            }
+            buf.set_stringn(popup.x.saturating_add(1), y, &text, inner_w, style);
+            buf.set_stringn(
+                popup.x.saturating_add(popup.width.saturating_sub(1)),
+                y,
+                "│",
+                1,
+                border,
+            );
+        }
+
+        // Bottom border with fzf-like counter on the right: `3/10`
+        let counter = format!("{}/{}", selected + 1, n);
+        let inner_w = popup.width.saturating_sub(2) as usize;
+        let dashes = inner_w.saturating_sub(counter.len().saturating_add(2));
+        let bottom = format!("└{} {} ┘", "─".repeat(dashes), counter);
+        let footer_y = popup.bottom().saturating_sub(1);
+        buf.set_stringn(
+            popup.x,
+            footer_y,
+            &bottom,
+            popup.width as usize,
+            footer_style.patch(border),
+        );
     }
 }
 
@@ -1327,6 +1459,9 @@ pub struct CsvTableState {
     pub prompt: Option<String>,
     pub last_autoreload_at: Option<Instant>,
     pub debug: String,
+    /// Tab-completion candidates for `:` / filter / find buffers.
+    pub completion_candidates: Vec<String>,
+    pub completion_index: isize,
 }
 
 impl CsvTableState {
@@ -1337,6 +1472,7 @@ impl CsvTableState {
         ignore_case: bool,
         color_columns: bool,
         prompt: Option<String>,
+        theme: Theme,
     ) -> Self {
         Self {
             rows_offset: 0,
@@ -1363,11 +1499,13 @@ impl CsvTableState {
             is_word_wrap: false,
             column_width_overrides: ColumnWidthOverrides::new(),
             cursor_xy: None,
-            theme: Theme::default(),
+            theme,
             color_columns,
             prompt,
             last_autoreload_at: None,
             debug: "".into(),
+            completion_candidates: Vec::new(),
+            completion_index: -1,
         }
     }
 

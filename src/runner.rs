@@ -89,6 +89,13 @@ struct Args {
     #[arg(long, alias = "colorful", visible_alias = "colorful")]
     color_columns: bool,
 
+    /// Color theme: built-in name (auto, dark, light), path to a .toml theme file, or a theme name
+    /// from the config themes directory (~/.config/csvlens/themes/<name>.toml).
+    ///
+    /// If omitted, uses `CSVLENS_THEME`, then `theme` in ~/.config/csvlens/config.toml, then `auto`.
+    #[arg(long, value_name = "theme")]
+    theme: Option<String>,
+
     /// Show a custom prompt message in the status bar. Supports ANSI escape codes for colored or
     /// styled text.
     #[arg(long, value_name = "prompt")]
@@ -160,6 +167,7 @@ impl From<Args> for CsvlensOptions {
             debug: args.debug,
             freeze_cols_offset: None,
             color_columns: args.color_columns,
+            theme: args.theme,
             prompt: args.prompt,
             wrap_mode: Args::get_wrap_mode(args.wrap, args.wrap_chars, args.wrap_words),
             auto_reload: args.auto_reload,
@@ -184,6 +192,9 @@ pub struct CsvlensOptions {
     pub debug: bool,
     pub freeze_cols_offset: Option<u64>,
     pub color_columns: bool,
+    /// Theme name (`auto`, `dark`, `light`), path to a TOML theme file, or a named theme under
+    /// the config themes directory. When `None`, auto-detects the terminal light/dark mode.
+    pub theme: Option<String>,
     pub prompt: Option<String>,
     pub wrap_mode: Option<WrapMode>,
     pub auto_reload: bool,
@@ -261,6 +272,11 @@ pub fn run_csvlens_with_options(options: CsvlensOptions) -> CsvlensResult<Option
         options.comma_separated,
     )?;
 
+    let theme = match &options.theme {
+        Some(spec) => crate::theme::Theme::resolve(spec)?,
+        None => crate::theme::Theme::load_preferred()?,
+    };
+
     let app = App::new(
         options.filename,
         delimiter,
@@ -277,6 +293,7 @@ pub fn run_csvlens_with_options(options: CsvlensOptions) -> CsvlensResult<Option
         options.wrap_mode,
         options.auto_reload,
         options.no_streaming_stdin,
+        theme,
     )?;
 
     let mut app_runner = AppRunner::new(app);

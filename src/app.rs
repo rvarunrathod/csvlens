@@ -206,6 +206,7 @@ impl App {
         wrap_mode: Option<WrapMode>,
         auto_reload: bool,
         no_streaming_stdin: bool,
+        theme: crate::theme::Theme,
     ) -> CsvlensResult<Self> {
         // TODO: pass a base_config to wait for header properly?
         let seekable_file = SeekableFile::new(&original_filename, no_streaming_stdin)?;
@@ -256,6 +257,7 @@ impl App {
             ignore_case,
             color_columns,
             prompt,
+            theme,
         );
 
         let finder: Option<find::Finder> = None;
@@ -319,8 +321,12 @@ impl App {
     ) -> CsvlensResult<Option<String>> {
         loop {
             let control = self.input_handler.next();
-            if matches!(control, Control::Quit) {
-                if self.help_page_state.is_active() {
+            if matches!(control, Control::Quit)
+                || matches!(control, Control::Command(crate::command::ColonCommand::Quit))
+            {
+                if self.help_page_state.is_active()
+                    && !matches!(control, Control::Command(crate::command::ColonCommand::Quit))
+                {
                     self.help_page_state.deactivate();
                     self.input_handler.exit_help_mode();
                 } else {
@@ -341,7 +347,14 @@ impl App {
                 self.help_page_state.activate();
                 self.input_handler.enter_help_mode();
             }
+            // Keep Tab-completion aware of current headers.
+            self.input_handler
+                .set_completion_columns(self.rows_view.raw_headers().clone());
             self.step(&control)?;
+            // Surface completion candidates on the status line.
+            self.csv_table_state.completion_candidates =
+                self.input_handler.completion_candidates.clone();
+            self.csv_table_state.completion_index = self.input_handler.completion_index;
             self.draw(terminal)?;
         }
     }
@@ -474,6 +487,9 @@ impl App {
             }
             Control::Find(s) | Control::Filter(s) => {
                 self.handle_find_or_filter(s, matches!(control, Control::Filter(_)), false);
+            }
+            Control::Command(cmd) => {
+                self.handle_colon_command(cmd)?;
             }
             Control::FindLikeCell | Control::FilterLikeCell => {
                 if let Some(value) = self.rows_view.get_cell_value_from_selection() {
@@ -646,6 +662,7 @@ impl App {
                         finder.column_index(),
                         finder.starting_row_index(),
                         sorter,
+                        finder.predicates().map(|p| p.to_vec()),
                     );
                 } else {
                     self.create_finder(target, self.rows_view.is_filter(), sorter);
@@ -784,6 +801,25 @@ impl App {
             self.get_selected_column_index().map(|x| x as usize),
             self.get_finder_starting_row_index(),
             sorter,
+            None,
+        );
+    }
+
+    fn create_finder_with_predicates(
+        &mut self,
+        predicates: Vec<crate::command::ResolvedPredicate>,
+        is_filter: bool,
+        sorter: Option<Arc<sort::Sorter>>,
+    ) {
+        // Dummy regex (unused when predicates are set) — must be valid.
+        let target = Regex::new("a^").unwrap();
+        self.create_finder_with_params(
+            target,
+            is_filter,
+            None,
+            self.get_finder_starting_row_index(),
+            sorter,
+            Some(predicates),
         );
     }
 
@@ -794,16 +830,29 @@ impl App {
         column_index: Option<usize>,
         starting_row_index: usize,
         sorter: Option<Arc<sort::Sorter>>,
+        predicates: Option<Vec<crate::command::ResolvedPredicate>>,
     ) {
-        let finder = find::Finder::new(
-            self.shared_config.clone(),
-            target,
-            column_index,
-            starting_row_index,
-            sorter,
-            self.sort_order,
-            self.columns_filter.clone(),
-        )
+        let finder = match predicates {
+            Some(preds) => find::Finder::new_with_predicates(
+                self.shared_config.clone(),
+                target,
+                column_index,
+                starting_row_index,
+                sorter,
+                self.sort_order,
+                self.columns_filter.clone(),
+                Some(preds),
+            ),
+            None => find::Finder::new(
+                self.shared_config.clone(),
+                target,
+                column_index,
+                starting_row_index,
+                sorter,
+                self.sort_order,
+                self.columns_filter.clone(),
+            ),
+        }
         .unwrap();
 
         // Instead of calling rows_view.set_filter() right away, wait for a bit until the first
@@ -822,6 +871,153 @@ impl App {
             self.scroll_to_found_state = ScrollToFoundState::Pending;
         }
         self.finder = Some(finder);
+    }
+
+    fn handle_colon_command(&mut self, cmd: &crate::command::ColonCommand) -> CsvlensResult<()> {
+        use crate::command::ColonCommand;
+        match cmd {
+            ColonCommand::Quit => {
+                // Quit is handled in main_loop before/with this control variant.
+            }
+            ColonCommand::Help => {
+                self.help_page_state.activate();
+                self.input_handler.enter_help_mode();
+            }
+            ColonCommand::ClearSearch => {
+                self.reset_filter(true);
+                self.transient_message
+                    .replace("Cleared find / row filter".into());
+            }
+            ColonCommand::Clear => {
+                self.reset_filter(true);
+                self.reset_columns_filter();
+                self.sorter = None;
+                self.transient_message
+                    .replace("Cleared filters, columns, and sort".into());
+            }
+            ColonCommand::Goto(n) => {
+                self.rows_view.set_rows_from(n.saturating_sub(1) as u64)?;
+            }
+            ColonCommand::Theme(spec) => match crate::theme::Theme::resolve(spec) {
+                Ok(theme) => {
+                    self.csv_table_state.theme = theme;
+                    self.transient_message
+                        .replace(format!("Theme: {spec}"));
+                }
+                Err(e) => {
+                    self.transient_message.replace(format!("{e}"));
+                }
+            },
+            ColonCommand::Export(path) => {
+                self.transient_message.replace(format!(
+                    "Export to '{path}' is not implemented yet (use Ctrl+e for marked rows)"
+                ));
+            }
+            ColonCommand::Columns(spec) => {
+                // Comma-separated exact names → regex alternation of escaped names; else regex.
+                let pat = if spec.contains(',') && !spec.contains('|') {
+                    spec.split(',')
+                        .map(|s| {
+                            let name = crate::command::unquote_column(s.trim());
+                            format!("^{}$", regex::escape(&name))
+                        })
+                        .collect::<Vec<_>>()
+                        .join("|")
+                } else if crate::command::unquote_column(spec) != *spec
+                    || (!spec.contains('.')
+                        && !spec.contains('*')
+                        && !spec.contains('[')
+                        && !spec.contains('('))
+                {
+                    // Single column name (possibly quoted) → exact match
+                    let name = crate::command::unquote_column(spec.trim());
+                    if self
+                        .rows_view
+                        .raw_headers()
+                        .iter()
+                        .any(|h| h == &name || h.eq_ignore_ascii_case(&name))
+                    {
+                        format!("^{}$", regex::escape(&name))
+                    } else {
+                        spec.clone()
+                    }
+                } else {
+                    spec.clone()
+                };
+                self.set_columns_filter(&pat);
+            }
+            ColonCommand::Sort { column, descending } => {
+                if self.shared_config.is_streaming() {
+                    self.transient_message.replace(
+                        "Sorting is not supported when data is still streaming".into(),
+                    );
+                } else {
+                    let name = crate::command::unquote_column(column);
+                    let headers = self.rows_view.raw_headers().clone();
+                    match headers
+                        .iter()
+                        .position(|h| h == &name || h.eq_ignore_ascii_case(&name))
+                    {
+                        Some(idx) => {
+                            self.sort_order = if *descending {
+                                SortOrder::Descending
+                            } else {
+                                SortOrder::Ascending
+                            };
+                            let col_name = headers[idx].clone();
+                            let sorter = Arc::new(sort::Sorter::new(
+                                self.shared_config.clone(),
+                                idx,
+                                col_name.clone(),
+                                sort::SortType::Auto,
+                            ));
+                            self.sorter = Some(sorter);
+                            self.rows_view
+                                .set_sorter(self.sorter.as_ref().unwrap())?;
+                            self.transient_message.replace(format!(
+                                "Sort {} by {}",
+                                if *descending { "desc" } else { "asc" },
+                                col_name
+                            ));
+                        }
+                        None => {
+                            self.transient_message
+                                .replace(format!("Unknown column '{name}'"));
+                        }
+                    }
+                }
+            }
+            ColonCommand::Filter(expr) | ColonCommand::Find(expr) => {
+                let is_filter = matches!(cmd, ColonCommand::Filter(_));
+                let headers = self.rows_view.raw_headers();
+                match expr.resolve(headers, self.ignore_case) {
+                    Ok(preds) => {
+                        let sorter = self.finished_sorter();
+                        self.create_finder_with_predicates(preds, is_filter, sorter);
+                    }
+                    Err(e) => {
+                        self.transient_message.replace(e);
+                    }
+                }
+            }
+            ColonCommand::FilterRegex(s) => {
+                self.handle_find_or_filter(s, true, false);
+            }
+            ColonCommand::FindRegex(s) => {
+                self.handle_find_or_filter(s, false, false);
+            }
+        }
+        self.csv_table_state.reset_buffer();
+        Ok(())
+    }
+
+    fn finished_sorter(&self) -> Option<Arc<sort::Sorter>> {
+        if let Some(s) = &self.sorter {
+            if s.status() == SorterStatus::Finished {
+                return Some(s.clone());
+            }
+        }
+        None
     }
 
     fn create_regex(&mut self, s: &str, escape: bool) -> std::result::Result<Regex, regex::Error> {
@@ -950,6 +1146,7 @@ impl App {
                 finder.column_index(),
                 finder.starting_row_index(),
                 None,
+                finder.predicates().map(|p| p.to_vec()),
             );
         }
 
@@ -1167,6 +1364,7 @@ mod tests {
                 self.wrap_mode,
                 false,
                 false,
+                crate::theme::Theme::default(),
             )
         }
 
